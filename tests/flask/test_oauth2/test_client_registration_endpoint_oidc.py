@@ -40,8 +40,13 @@ def metadata():
     return {}
 
 
+@pytest.fixture
+def oidc_claims():
+    return OIDCClientMetadataClaims
+
+
 @pytest.fixture(autouse=True)
-def server(server, app, metadata):
+def server(server, app, metadata, oidc_claims):
     class MyClientRegistration(ClientRegistrationEndpoint):
         def get_server_metadata(self):
             return metadata
@@ -50,7 +55,7 @@ def server(server, app, metadata):
         MyClientRegistration(
             claims_classes=[
                 OAuth2ClientMetadataClaims,
-                OIDCClientMetadataClaims,
+                oidc_claims,
                 BackchannelClientMetadataClaims,
             ]
         )
@@ -830,3 +835,125 @@ def test_pairwise_redirect_uris_hosts(test_client, metadata, body, valid):
         assert rv.status_code == 201, resp
     else:
         assert resp["error"] == "invalid_client_metadata"
+
+
+SECTOR_URI = "https://a.test/sector.json"
+REDIRECT_URIS = ["https://a.test/cb", "https://b.test/cb"]
+
+
+def register_sector_client(test_client, sector_identifier_uri=SECTOR_URI, **body):
+    return test_client.post(
+        "/create_client",
+        json={
+            "client_name": "Authlib",
+            "redirect_uris": REDIRECT_URIS,
+            "sector_identifier_uri": sector_identifier_uri,
+            **body,
+        },
+        headers={"Authorization": "bearer abc"},
+    )
+
+
+class TestSectorIdentifierDocument:
+    """Per OpenID Connect Registration §5, the sector_identifier_uri document
+    must contain all the registered redirect_uris."""
+
+    @pytest.fixture
+    def sector_documents(self):
+        return {}
+
+    @pytest.fixture
+    def oidc_claims(self, sector_documents):
+        class SectorClientMetadataClaims(OIDCClientMetadataClaims):
+            def fetch_sector_identifier_document(self, uri):
+                assert uri.startswith("https://")
+                return sector_documents.get(uri)
+
+        return SectorClientMetadataClaims
+
+    def test_valid_document(self, test_client, sector_documents):
+        """The document may list more redirect_uris than the client registers."""
+        sector_documents[SECTOR_URI] = [
+            "https://c.test/cb",
+            "https://b.test/cb",
+            "https://a.test/cb",
+        ]
+        rv = register_sector_client(test_client)
+        resp = json.loads(rv.data)
+        assert rv.status_code == 201, resp
+        assert resp["sector_identifier_uri"] == SECTOR_URI
+
+    def test_no_sector_identifier_uri(self, test_client):
+        rv = test_client.post(
+            "/create_client",
+            json={"client_name": "Authlib", "redirect_uris": REDIRECT_URIS},
+            headers={"Authorization": "bearer abc"},
+        )
+        assert rv.status_code == 201, json.loads(rv.data)
+
+    def test_missing_redirect_uri(self, test_client, sector_documents):
+        sector_documents[SECTOR_URI] = ["https://a.test/cb"]
+        rv = register_sector_client(test_client)
+        resp = json.loads(rv.data)
+        assert rv.status_code == 400
+        assert resp["error"] == "invalid_client_metadata"
+        assert "sector_identifier_uri" in resp["error_description"]
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            None,
+            {"redirect_uris": REDIRECT_URIS},
+            "https://a.test/cb",
+            [],
+            [*REDIRECT_URIS, 1],
+            [REDIRECT_URIS],
+        ],
+    )
+    def test_document_not_an_array_of_strings(
+        self, test_client, sector_documents, document
+    ):
+        sector_documents[SECTOR_URI] = document
+        rv = register_sector_client(test_client)
+        resp = json.loads(rv.data)
+        assert rv.status_code == 400
+        assert resp["error"] == "invalid_client_metadata"
+        assert "sector_identifier_uri" in resp["error_description"]
+
+    @pytest.mark.parametrize(
+        "redirect_uris", ["https://a.test/cb", [["https://a.test/cb"]]]
+    )
+    def test_invalid_redirect_uris(self, test_client, sector_documents, redirect_uris):
+        sector_documents[SECTOR_URI] = REDIRECT_URIS
+        rv = register_sector_client(test_client, redirect_uris=redirect_uris)
+        assert rv.status_code == 400
+        assert json.loads(rv.data)["error"] == "invalid_client_metadata"
+
+    def test_uri_not_https(self, test_client, sector_documents, monkeypatch):
+        """The hook is not called with a URI that does not use https."""
+        monkeypatch.delenv("AUTHLIB_INSECURE_TRANSPORT")
+        sector_documents["http://a.test/sector.json"] = REDIRECT_URIS
+        rv = register_sector_client(test_client, "http://a.test/sector.json")
+        assert rv.status_code == 400
+        assert json.loads(rv.data)["error"] == "invalid_client_metadata"
+
+
+class TestSectorIdentifierDocumentNotImplemented:
+    """Without fetch_sector_identifier_document, only the form of the
+    sector_identifier_uri is checked."""
+
+    def test_valid_uri(self, test_client):
+        rv = register_sector_client(test_client)
+        resp = json.loads(rv.data)
+        assert rv.status_code == 201, resp
+        assert resp["sector_identifier_uri"] == SECTOR_URI
+
+    def test_http_uri(self, test_client, monkeypatch):
+        monkeypatch.delenv("AUTHLIB_INSECURE_TRANSPORT")
+        rv = register_sector_client(test_client, "http://a.test/sector.json")
+        assert rv.status_code == 201, json.loads(rv.data)
+
+    def test_invalid_uri(self, test_client):
+        rv = register_sector_client(test_client, "not a uri")
+        assert rv.status_code == 400
+        assert json.loads(rv.data)["error"] == "invalid_client_metadata"

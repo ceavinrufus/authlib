@@ -208,8 +208,67 @@ class ClientMetadataClaims(BaseClaims):
         Please see Section 5. Providers that use pairwise sub (subject) values SHOULD
         utilize the sector_identifier_uri value provided in the Subject Identifier
         calculation for pairwise identifiers.
+
+        When a subclass implements :meth:`fetch_sector_identifier_document`, the
+        URI must use the ``https`` scheme and its document must contain every
+        registered ``redirect_uris`` value. Otherwise only the form of the URI is
+        checked.
         """
         self._validate_uri("sector_identifier_uri")
+        uri = self.get("sector_identifier_uri")
+        if not uri or not self._can_fetch_sector_identifier_document():
+            return
+
+        # Per OpenID Connect Registration §5, the Authorization Server verifies
+        # that the sector_identifier_uri uses the https scheme and that its
+        # document contains all the registered redirect_uris.
+        if not is_secure_transport(uri, allow_loopback=False):
+            raise InvalidClaimError("sector_identifier_uri")
+
+        document = self.fetch_sector_identifier_document(uri)
+        if not isinstance(document, list) or not all(
+            isinstance(item, str) for item in document
+        ):
+            raise InvalidClaimError("sector_identifier_uri")
+
+        redirect_uris = self.get("redirect_uris") or []
+        if not isinstance(redirect_uris, list) or not all(
+            isinstance(item, str) and item in document for item in redirect_uris
+        ):
+            raise InvalidClaimError("sector_identifier_uri")
+
+    def _can_fetch_sector_identifier_document(self):
+        return (
+            type(self).fetch_sector_identifier_document
+            is not ClientMetadataClaims.fetch_sector_identifier_document
+        )
+
+    def fetch_sector_identifier_document(self, uri):
+        """Fetch the document that the ``sector_identifier_uri`` references, and
+        return it parsed as JSON.
+
+        Authlib does not make network calls on the server side. To verify the
+        ``sector_identifier_uri`` at registration, subclass the claims class and
+        implement this method::
+
+            class MyClientMetadataClaims(ClientMetadataClaims):
+                def fetch_sector_identifier_document(self, uri):
+                    return fetch_json(uri)
+
+        The method receives a URI with the ``https`` scheme. It must return the
+        JSON document, which must be an array of ``redirect_uri`` values. If the
+        document cannot be retrieved or parsed, return ``None``: the
+        registration is then rejected with ``invalid_client_metadata``.
+
+        The URI is chosen by the client. Implementations should protect
+        against server-side request forgery: refuse private and loopback
+        addresses, do not follow redirects, set a short timeout and limit the
+        size of the response.
+
+        This method is not implemented by default, and the document is then
+        not verified.
+        """
+        raise NotImplementedError()
 
     def validate_subject_type(self):
         """subject_type requested for responses to this Client.

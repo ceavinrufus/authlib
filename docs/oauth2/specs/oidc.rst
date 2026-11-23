@@ -166,6 +166,56 @@ The `OpenID Connect Dynamic Client Registration <https://openid.net/specs/openid
         )
     )
 
+Verifying the ``sector_identifier_uri``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Per `OpenID Connect Dynamic Client Registration §5
+<https://openid.net/specs/openid-connect-registration-1_0.html#SectorIdentifierValidation>`__,
+when a client registers a ``sector_identifier_uri``, the server fetches the
+document that it references, a JSON array of ``redirect_uri`` values, and
+checks that it contains every ``redirect_uris`` value of the client. Authlib
+does not make network calls on the server side, so the fetch is left to your
+application. Subclass :class:`~authlib.oidc.registration.ClientMetadataClaims`
+and implement
+:meth:`~authlib.oidc.registration.ClientMetadataClaims.fetch_sector_identifier_document`.
+It receives the URI, which uses the ``https`` scheme, and returns the parsed
+document, or ``None`` when it cannot be retrieved:
+
+.. code-block:: python
+
+    import requests
+
+    class SectorClientMetadataClaims(OIDCClientMetadataClaims):
+        def fetch_sector_identifier_document(self, uri):
+            try:
+                response = requests.get(uri, timeout=5, allow_redirects=False)
+                response.raise_for_status()
+                return response.json()
+            except (requests.RequestException, ValueError):
+                return None
+
+    authorization_server.register_endpoint(
+        MyClientRegistrationEndpoint(
+            claims_classes=[OAuth2ClientMetadataClaims, SectorClientMetadataClaims]
+        )
+    )
+
+The registration fails with ``invalid_client_metadata`` when the document is
+not a JSON array of strings, or when a ``redirect_uris`` value of the client is
+missing from it. The same classes can be given to a
+:class:`~authlib.oauth2.rfc7592.ClientConfigurationEndpoint`, so that a client
+update is verified too.
+
+.. warning::
+
+    The ``sector_identifier_uri`` is chosen by the client. Protect your
+    implementation against server-side request forgery: use ``https`` only,
+    refuse private and loopback addresses, do not follow redirects, set a
+    timeout, and limit the size of the response.
+
+When ``fetch_sector_identifier_document`` is not implemented, the document is
+not verified, and only the form of the ``sector_identifier_uri`` is checked.
+
 
 
 .. automodule:: authlib.oidc.registration

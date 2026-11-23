@@ -16,7 +16,7 @@ from .models import User
 def env():
     os.environ["AUTHLIB_INSECURE_TRANSPORT"] = "true"
     yield
-    del os.environ["AUTHLIB_INSECURE_TRANSPORT"]
+    os.environ.pop("AUTHLIB_INSECURE_TRANSPORT", None)
 
 
 @pytest.fixture

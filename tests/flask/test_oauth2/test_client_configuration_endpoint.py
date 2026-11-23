@@ -1,9 +1,11 @@
 import pytest
 from flask import json
 
+from authlib.oauth2.rfc7591 import ClientMetadataClaims as OAuth2ClientMetadataClaims
 from authlib.oauth2.rfc7592 import (
     ClientConfigurationEndpoint as _ClientConfigurationEndpoint,
 )
+from authlib.oidc.registration import ClientMetadataClaims as OIDCClientMetadataClaims
 from tests.util import INVALID_JSON_BODIES
 
 from .models import Client
@@ -55,8 +57,13 @@ def metadata():
     return {}
 
 
+@pytest.fixture
+def claims_classes():
+    return None
+
+
 @pytest.fixture(autouse=True)
-def server(server, app, metadata):
+def server(server, app, metadata, claims_classes):
     @app.route("/configure_client/<client_id>", methods=["PUT", "GET", "DELETE"])
     def configure_client(client_id):
         return server.create_endpoint_response(
@@ -67,7 +74,7 @@ def server(server, app, metadata):
         def get_server_metadata(test_client):
             return metadata
 
-    server.register_endpoint(MyClientConfiguration)
+    server.register_endpoint(MyClientConfiguration(claims_classes=claims_classes))
     return server
 
 
@@ -193,6 +200,61 @@ def test_update_client(test_client, client, token):
     assert resp["client_name"] == "NewAuthlib"
     assert client.client_name == "NewAuthlib"
     assert client.scope == ""
+
+
+class TestUpdateSectorIdentifierDocument:
+    """Per OpenID Connect Registration §5, the sector_identifier_uri document
+    must contain all the registered redirect_uris of an updated client."""
+
+    sector_identifier_uri = "https://a.test/sector.json"
+    redirect_uris = ["https://a.test/cb", "https://b.test/cb"]
+
+    @pytest.fixture
+    def documents(self):
+        return {}
+
+    @pytest.fixture
+    def claims_classes(self, documents):
+        class SectorClientMetadataClaims(OIDCClientMetadataClaims):
+            def fetch_sector_identifier_document(self, uri):
+                return documents.get(uri)
+
+        return [OAuth2ClientMetadataClaims, SectorClientMetadataClaims]
+
+    def update(self, test_client, client, token):
+        headers = {"Authorization": f"bearer {token.access_token}"}
+        body = {
+            "client_id": client.client_id,
+            "client_name": "NewAuthlib",
+            "redirect_uris": self.redirect_uris,
+            "sector_identifier_uri": self.sector_identifier_uri,
+        }
+        return test_client.put(
+            "/configure_client/client-id", json=body, headers=headers
+        )
+
+    def test_valid_document(self, test_client, client, token, documents):
+        documents[self.sector_identifier_uri] = [*self.redirect_uris, "https://c.test"]
+        rv = self.update(test_client, client, token)
+        assert rv.status_code == 200, json.loads(rv.data)
+        assert client.client_name == "NewAuthlib"
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            ["https://a.test/cb"],
+            {"redirect_uris": ["https://a.test/cb", "https://b.test/cb"]},
+            None,
+        ],
+    )
+    def test_invalid_document(self, test_client, client, token, documents, document):
+        documents[self.sector_identifier_uri] = document
+        rv = self.update(test_client, client, token)
+        resp = json.loads(rv.data)
+        assert rv.status_code == 400
+        assert resp["error"] == "invalid_client_metadata"
+        assert "sector_identifier_uri" in resp["error_description"]
+        assert client.client_name == "Authlib"
 
 
 @pytest.mark.parametrize("body", INVALID_JSON_BODIES)
